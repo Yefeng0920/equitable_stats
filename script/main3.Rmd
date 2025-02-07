@@ -1,0 +1,314 @@
+---
+title: "Catalysing Mathematical, Computing, and Statistical Innovation Towards Applied Sciences"
+author: "Yefeng Yang, Manman Liu, Malgorzata Lagisz, and Shinichi Nakagawa"
+date: "`r Sys.Date()`"  # Automatically inserts the current date
+output: 
+  html_document:
+    toc: true             # Adds a table of contents
+    toc_float: true       # Makes the TOC float as you scroll
+    toc_depth: 3          # Shows up to third-level headers (###)
+    number_sections: true # Numbers the sections
+    code_folding: show    # Hides code by default, allows toggling
+    theme: cosmo          # Bootstrap theme for a modern look
+    highlight: tango      # Syntax highlighting style
+    df_print: paged       # Pagination for large data frames
+    fig_caption: true     # Adds captions to figures
+    fig_width: 7          # Default figure width
+    fig_height: 5         # Default figure height
+    keep_md: true         # Keeps the markdown file after knitting
+    smooth_scroll: true   # Smooth scrolling between sections
+---
+
+# Required packages
+
+Load packages that are necessary to the data wrangling and modelling. 
+
+```{r, warning=FALSE}
+suppressMessages({
+  library(dplyr)
+  library(readr)
+  library(tidyr) 
+  library(tidyverse)
+  library(stringr)
+  library(ggplot2)
+  library(ggridges)
+  library(ggdist)
+  library(metafor)
+  library(here)
+  library(ggExtra)
+  library(boot)
+  library(DescTools)
+  library(ggsci)
+  library(paletteer)
+  })
+# function
+source(here("Func","func.R"))
+```
+
+
+# Load data
+
+Load data bibliometric data from 161 top-ranked mathematics journals (by their 2023 Journal Impact Factor).
+
+```{r, warning=FALSE}
+# load
+data <- read.csv(here("dat","data.csv"))
+# remove na
+data <- na.omit(data)
+# recode
+data <- data %>%
+  mutate(Subfield = case_when(
+    Subfield == "MATHEMATICS" ~ "Pure Math",
+    Subfield == "MATHEMATICS, APPLIED" ~ "Applied Math",
+    Subfield == "COMPUTER SCIENCE, ARTIFICIAL INTELLIGENCE" ~ "Artificial Intelligence",
+    Subfield == "STATISTICS and PROBABILITY" ~ "Statistical Science",
+    Subfield == "COMPUTER SCIENCE, THEORY and METHODS" ~ "Computational Math",
+    Subfield == "MATHEMATICS, INTERDISCIPLINARY APPLICATIONS" ~ "Interdisciplinary Math",
+    Subfield == "OPERATIONS RESEARCH and MANAGEMENT SCIENCE" ~ "Management Math",
+    Subfield == "SOCIAL SCIENCES, MATHEMATICAL METHODS" ~ "Social Math",
+    Subfield == "MATHEMATICAL and COMPUTATIONAL BIOLOGY" ~ "Biological Math",
+    Subfield == "PHYSICS, MATHEMATICAL" ~ "Physics Math",
+    Subfield == "LOGIC" ~ "Logic Math",
+    Subfield == "PSYCHOLOGY, MATHEMATICAL" ~ "Psychological Math",
+    TRUE ~ Subfield  
+  ))
+# relevel
+levels = c("Pure Math",
+           "Applied Math",
+           "Physics Math", 
+           "Statistical Science",
+           "Interdisciplinary Math",
+           "Logic Math", 
+           "Computational Math",
+           "Artificial Intelligence",
+           "Biological Math", 
+           "Management Math",
+           "Social Math",
+           "Psychological Math")
+data$Subfield <- factor(data$Subfield, levels = levels)
+```
+
+# Computation
+
+Calculate the first metric to quantify the percent of citation to top-ranked mathematics journals originating from applied disciplines.
+
+```{r, warning=FALSE}
+# subset of "citing journals are non-mathematical journals"
+dat <- data %>% filter(Mathematics_group == "No") %>%
+  group_by(Journal_cited, Subfield) %>%
+    summarize(
+    x = sum(Citations, na.rm = TRUE),
+    Publisher = first(Publisher),
+    Impact_factor = first(Impact_factor),
+    Subfield = first(Subfield),
+    n = first(N),
+    .groups = "drop"
+  )
+
+# find the journal with 0 citation from applied fields
+out <- setdiff(data$Journal_cited, dat$Journal_cited)
+dat.out <- data %>% filter(Journal_cited %in% out) %>%
+  group_by(Journal_cited) %>%
+    summarize(
+    x = 0, # 0 citation from applied fields
+    Publisher = first(Publisher),
+    Impact_factor = first(Impact_factor),
+    Subfield = first(Subfield),
+    n = first(N),
+    .groups = "drop"
+  )
+
+# bind
+dat <- rbind(dat, dat.out)
+
+# manual calculation of effect sizes
+dat$pi <- with(dat, x/n)
+# the logit transformed proportions - log odds
+dat <- escalc(measure = "PLO", xi = x, ni = n, data = dat)
+```
+
+# Modelling
+
+Let's use the random-effects model and mixed-effects logistic model to get the estimate.
+
+```{r, warning=FALSE}
+# normal-normal model
+res <- rma(yi, vi, method = "REML", mods = ~ I(Subfield) - 1, test = "knha", data = dat) # remove -1 to get R2 = 54.11%
+summary(res)
+inv.logit(res$beta)
+
+# sensitivity analysis using logistic regression model with a random intercept
+res2 <- rma.glmm(measure = "PLO", xi = x, ni = n, mods = ~ I(Subfield) - 1, data = dat)
+res2
+inv.logit(res2$beta)
+```
+
+# Plot
+
+## Accessibility index
+
+```{r, warning=FALSE}
+# update `Subfield` as factor with a reversed levels
+levels2 = rev(levels)
+dat$Subfield <- factor(dat$Subfield, levels = levels2)
+# prepare `dat_fig` with the same level ordering
+dat_fig <- dat[, c("Subfield", "pi")]
+dat_fig$Subfield <- factor(dat_fig$Subfield, levels = levels2)
+
+
+# model estimates
+dat_fig2 <- data.frame(Subfield = levels, # need to use levels rather than levels2
+                        est = inv.logit(res$beta) %>% as.numeric(),
+                        lower = inv.logit(res$ci.lb) %>% as.numeric(),
+                        upper = inv.logit(res$ci.ub) %>% as.numeric())
+
+
+# plot
+p <- dat_fig %>%
+  ggplot(aes(x = Subfield, y = pi, fill = Subfield))  +
+  stat_slabinterval(
+    aes(slab_alpha = after_stat(f)), 
+    thickness = 1, justification = 0.5, color = NA, interval_alpha = 1,
+    .width = c(0.66, 0.95)
+  ) +
+  geom_linerange(
+    data = dat_fig2, 
+    aes(x = Subfield, ymin = lower, ymax = upper),
+    size = 2,
+    color = "black"
+  ) +
+  geom_point(
+    data = dat_fig2, 
+    aes(x = Subfield, y = est),
+    size = 4, shape = 21, color = "black", fill = "white"
+  ) +
+  geom_text(
+    data = dat_fig2,
+    aes(x = Subfield, y = est, label = paste0(round(est * 100, 0), "%")), 
+    vjust = -0.8,
+    size = 3, 
+    color = "gray20"
+  ) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2), labels =  scales::percent_format(accuracy=2)) + 
+  scale_fill_manual(values = paletteer_d("dutchmasters::milkmaid", 12, type = "discrete")) + 
+  theme_bw() +
+  guides(fill = "none", color = "none", size = "none") +
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank()
+        ) +
+  labs(x = "Subfield of Mathematics", y = "Translational impact") +
+  coord_flip()
+
+p
+```
+
+## Interdisciplinary connectivity 
+
+```{r, warning=FALSE}
+# data frame
+dat_fig <- select(data, Subfield, ESI_category)
+# filter out ESI mathematics
+dat_fig <- dat_fig %>% filter(ESI_category != "Mathematics")
+# filter out rows with empty ESI_category
+dat_fig <- dat_fig %>%
+  filter(ESI_category != "")
+
+# add the first variable in alluvial plot
+dat_fig$Mathematics_cited <- rep("Mathematics", nrow(dat_fig))
+# plot
+datlong_fig <- dlong(dat_fig, Mathematics_cited, Subfield, ESI_category)
+datlong_fig$node <- as.factor(datlong_fig$node)
+datlong_fig$node <- factor(
+  datlong_fig$node,
+  levels = c(
+    "Psychological Math",
+    "Social Math",
+    "Management Math",
+    "Biological Math",
+    "Artificial Intelligence",
+    "Computational Math",
+    "Logic Math",
+    "Interdisciplinary Math",
+    "Statistical Science",
+    "Physics Math",
+    "Applied Math",
+    "Pure Math",
+    "Social Sciences",
+    "Psychiatry and Psychology",
+    "Plant and Animal Science",
+    "Physics",
+    "Pharmacology and Toxicology",
+    "Neuroscience and Behavior",
+    "Multidisciplinary",
+    "Molecular Biology and Genetics",
+    "Microbiology",
+    "Mathematics",
+    "Materials Sciences",
+    "Immunology",
+    "Geosciences",
+    "Environment and Ecology",
+    "Engineering",
+    "Economics and Business",
+    "Computer Science",
+    "Clinical Medicine",
+    "Chemistry",
+    "Biology and Biochemistry",
+    "Agricultural Sciences"
+  )
+)
+
+colors <- c(
+  "white",    # White
+  "#1f78b4",  # Blue
+  "#33a02c",  # Green
+  "#e31a1c",  # Red
+  "#ff7f00",  # Orange
+  "#6a3d9a",  # Purple
+  "#b15928",  # Brown
+  "#a6cee3",  # Light Blue
+  "#b2df8a",  # Light Green
+  "#fb9a99",  # Light Red
+  "#fdbf6f",  # Light Orange
+  "#cab2d6",  # Light Purple
+  "#ffff99",  # Light Yellow
+  "#8dd3c7",  # Aqua
+  "#ffffb3",  # Pale Yellow
+  "#bebada",  # Lavender
+  "#fb8072",  # Coral
+  "#80b1d3",  # Sky Blue
+  "#fdb462",  # Peach
+  "#b3de69",  # Lime Green
+  "#fccde5",  # Pink
+  "#bc80bd",  # Light Purple-Pink
+  "#ccebc5",  # Light Mint Green
+  "#ffed6f",  # Soft Yellow
+  "#8c564b",  # Earthy Brown
+  "#e377c2",  # Pastel Pink
+  "#7f7f7f",  # Neutral Gray
+  "#17becf",  # Cyan
+  "#aec7e8",  # Light Sky Blue
+  "#9edae5",  # Pale Aqua
+  "#9467bd",  # Medium Purple
+  "#d62728",  # Strong Red
+  "#2ca02c"   # Bright Green
+)
+p <- ggplot(datlong_fig, aes(x = x, next_x = next_x, node = node, next_node = next_node, fill = factor(node), label = node)) +
+  sankey_p(flow.alpha = 0.6, node.color = "transparent") + 
+  #sankey_p_label(size = 3, color = "white", fill = "gray10", alpha = 0.6) + 
+  sankey_p_label(size = 4, color = "gray10", fill = colors, alpha = 0.9) +
+  #scale_fill_manual(values = wes_palette("Cavalcanti1", n = 5)) +
+  #scale_fill_aaas() +
+  theme_sankey(base_size = 10) +
+  labs(x = NULL, title = " ") +
+  theme(legend.position = "none",
+        plot.title = element_text(color = "black", size = 14, hjust = .5),
+        axis.text.x = element_text(color = "black", size = 14)) +
+  scale_x_discrete(labels = c(" ", "Subfield of Mathematics", "Applied field of science"), position = "top")
+
+p
+```
+
+
+
